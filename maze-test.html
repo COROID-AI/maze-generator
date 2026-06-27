@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Maze Acceptance Test</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+      body {
+        margin: 0;
+        padding: 2rem clamp(1rem, 4vw, 3rem);
+        background: #0d1117;
+        color: #c9d1d9;
+        line-height: 1.5;
+      }
+      h1 { font-size: 1.25rem; margin: 0 0 0.25rem; }
+      p.sub { margin: 0 0 1.5rem; color: #8b949e; }
+      .result {
+        border: 1px solid #30363d;
+        border-radius: 8px;
+        padding: 1rem 1.25rem;
+        margin: 0 0 1rem;
+        background: #161b22;
+      }
+      .result h2 { font-size: 0.95rem; margin: 0 0 0.5rem; display: flex; align-items: center; gap: 0.5rem; }
+      .badge { font-size: 0.7rem; font-weight: 700; letter-spacing: 0.04em; padding: 0.15rem 0.5rem; border-radius: 999px; text-transform: uppercase; }
+      .pass { background: #196c2e; color: #d5ffe0; }
+      .fail { background: #8c1c13; color: #ffd9d4; }
+      .pending { background: #30363d; color: #c9d1d9; }
+      .detail { color: #8b949e; font-size: 0.85rem; white-space: pre-wrap; margin: 0.25rem 0 0; }
+      canvas { display: block; margin-top: 0.75rem; border: 1px solid #30363d; border-radius: 6px; background: #05070d; }
+      figcaption { color: #8b949e; font-size: 0.8rem; margin-top: 0.4rem; }
+      code { color: #79c0ff; }
+    </style>
+  </head>
+  <body>
+    <h1>Maze acceptance test</h1>
+    <p class="sub">
+      Verifies that the generator produces a <em>perfect maze</em> (connected spanning tree) and that the
+      solver returns a <em>shortest</em> path. Serve over HTTP (<code>python3 -m http.server</code>) so the
+      harness can read <code>index.html</code>'s optional <code>generateMaze</code> / <code>solveMaze</code> hooks.
+    </p>
+
+    <div class="result" id="gen-result">
+      <h2>Your generator <span class="badge pending" id="gen-badge">checking…</span></h2>
+      <p class="detail" id="gen-detail">Looking for <code>window.generateMaze</code> in ./index.html …</p>
+    </div>
+
+    <div class="result" id="solve-result">
+      <h2>Your solver <span class="badge pending" id="solve-badge">checking…</span></h2>
+      <p class="detail" id="solve-detail">Looking for <code>window.solveMaze</code> in ./index.html …</p>
+    </div>
+
+    <div class="result" id="ref-result">
+      <h2>Reference oracle <span class="badge pending" id="ref-badge">running…</span></h2>
+      <p class="detail" id="ref-detail"></p>
+      <figure style="margin:0">
+        <canvas id="ref-canvas" width="330" height="330"></canvas>
+        <figcaption>Reference perfect maze with its shortest path (top-left → bottom-right).</figcaption>
+      </figure>
+    </div>
+
+    <iframe id="app" src="./index.html" style="display:none" title="app under test"></iframe>
+
+    <script>
+      // ---- Reference generator (recursive backtracker) -----------------------
+      function emptyCells(cols, rows) {
+        return Array.from({ length: rows }, () =>
+          Array.from({ length: cols }, () => ({ N: false, E: false, S: false, W: false }))
+        );
+      }
+
+      function generateMazeRef(cols, rows) {
+        const cells = emptyCells(cols, rows);
+        const visited = Array.from({ length: rows }, () => new Array(cols).fill(false));
+        const dirs = [["N", -1, 0, "S"], ["S", 1, 0, "N"], ["E", 0, 1, "W"], ["W", 0, -1, "E"]];
+        const stack = [[0, 0]];
+        visited[0][0] = true;
+        while (stack.length) {
+          const [r, c] = stack[stack.length - 1];
+          const nbrs = [];
+          for (const [d, dr, dc, opp] of dirs) {
+            const nr = r + dr, nc = c + dc;
+            if (nr >= 0 && nr < rows && nc >= 0 && nc < cols && !visited[nr][nc]) nbrs.push([d, nr, nc, opp]);
+          }
+          if (!nbrs.length) { stack.pop(); continue; }
+          const [d, nr, nc, opp] = nbrs[(Math.random() * nbrs.length) | 0];
+          cells[r][c][d] = true;
+          cells[nr][nc][opp] = true;
+          visited[nr][nc] = true;
+          stack.push([nr, nc]);
+        }
+        return { cols, rows, cells };
+      }
+
+      // ---- Validators --------------------------------------------------------
+      function neighbours(cells, r, c) {
+        const cell = cells[r][c], out = [];
+        if (cell.N) out.push([r - 1, c]);
+        if (cell.S) out.push([r + 1, c]);
+        if (cell.E) out.push([r, c + 1]);
+        if (cell.W) out.push([r, c - 1]);
+        return out;
+      }
+
+      function validatePerfectMaze(maze) {
+        if (!maze || !maze.cells) return { ok: false, reason: "no maze / cells returned" };
+        const { cols, rows, cells } = maze;
+        if (cells.length !== rows || cells[0].length !== cols)
+          return { ok: false, reason: `cells dimensions ${cells.length}×${cells[0].length} ≠ ${rows}×${cols}` };
+
+        let edges = 0; // count each passage once (N + E only)
+        for (let r = 0; r < rows; r++) {
+          for (let c = 0; c < cols; c++) {
+            const cell = cells[r][c];
+            if (cell.N) { if (r === 0) return { ok: false, reason: `passage N off-grid at ${r},${c}` }; if (!cells[r-1][c].S) return { ok: false, reason: `asymmetric passage (N) at ${r},${c}` }; edges++; }
+            if (cell.S) { if (r === rows-1) return { ok: false, reason: `passage S off-grid at ${r},${c}` }; if (!cells[r+1][c].N) return { ok: false, reason: `asymmetric passage (S) at ${r},${c}` }; }
+            if (cell.E) { if (c === cols-1) return { ok: false, reason: `passage E off-grid at ${r},${c}` }; if (!cells[r][c+1].W) return { ok: false, reason: `asymmetric passage (E) at ${r},${c}` }; edges++; }
+            if (cell.W) { if (c === 0) return { ok: false, reason: `passage W off-grid at ${r},${c}` }; if (!cells[r][c-1].E) return { ok: false, reason: `asymmetric passage (W) at ${r},${c}` }; }
+          }
+        }
+        // connectivity
+        const total = cols * rows;
+        const seen = Array.from({ length: rows }, () => new Array(cols).fill(false));
+        const q = [[0, 0]]; seen[0][0] = true; let cnt = 1;
+        while (q.length) {
+          const [r, c] = q.shift();
+          for (const [nr, nc] of neighbours(cells, r, c)) {
+            if (nr >= 0 && nr < rows && nc >= 0 && nc < cols && !seen[nr][nc]) { seen[nr][nc] = true; cnt++; q.push([nr, nc]); }
+          }
+        }
+        if (cnt !== total) return { ok: false, reason: `not fully connected: ${cnt}/${total} cells reachable` };
+        if (edges !== total - 1) return { ok: false, reason: `not a tree: ${edges} passages, expected ${total - 1} (loops or disconnection)` };
+        return { ok: true, msg: `${cols}×${rows}: connected, ${edges} passages = cols·rows−1 → perfect maze.` };
+      }
+
+      function bfsDistance(maze, start, end) {
+        const { cols, rows, cells } = maze;
+        const dist = Array.from({ length: rows }, () => new Array(cols).fill(-1));
+        dist[start[0]][start[1]] = 0;
+        const q = [start];
+        while (q.length) {
+          const [r, c] = q.shift();
+          for (const [nr, nc] of neighbours(cells, r, c)) {
+            if (dist[nr][nc] === -1) { dist[nr][nc] = dist[r][c] + 1; q.push([nr, nc]); }
+          }
+        }
+        return dist[end[0]][end[1]];
+      }
+
+      function validateSolution(maze, path, start, end) {
+        if (!Array.isArray(path) || path.length === 0) return { ok: false, reason: "no path returned" };
+        const first = path[0], last = path[path.length - 1];
+        if (first[0] !== start[0] || first[1] !== start[1]) return { ok: false, reason: "path does not start at the start cell" };
+        if (last[0] !== end[0] || last[1] !== end[1]) return { ok: false, reason: "path does not end at the end cell" };
+        const { cells } = maze;
+        for (let i = 1; i < path.length; i++) {
+          const [r, c] = path[i - 1], [nr, nc] = path[i];
+          const dr = nr - r, dc = nc - c;
+          let open = false;
+          if (dr === -1 && dc === 0) open = cells[r][c].N;
+          else if (dr === 1 && dc === 0) open = cells[r][c].S;
+          else if (dr === 0 && dc === 1) open = cells[r][c].E;
+          else if (dr === 0 && dc === -1) open = cells[r][c].W;
+          if (!open) return { ok: false, reason: `illegal move ${r},${c} → ${nr},${nc} (wall or not adjacent)` };
+        }
+        const optimal = bfsDistance(maze, start, end);
+        const steps = path.length - 1;
+        if (steps !== optimal) return { ok: false, reason: `path length ${steps} is not shortest (optimal is ${optimal})` };
+        return { ok: true, msg: `valid path of ${steps} steps = shortest distance.` };
+      }
+
+      function setBadge(id, pass, label) {
+        const el = document.getElementById(id);
+        el.className = "badge " + (pass ? "pass" : "fail");
+        el.textContent = label || (pass ? "pass" : "fail");
+      }
+
+      // ---- Reference oracle (proves the validators are correct) --------------
+      const refMaze = generateMazeRef(20, 20);
+      (function runReference() {
+        const gen = validatePerfectMaze(refMaze);
+        const start = [0, 0], end = [refMaze.rows - 1, refMaze.cols - 1];
+        const path = bfsPath(refMaze, start, end);
+        const sol = validateSolution(refMaze, path, start, end);
+        setBadge("ref-badge", gen.ok && sol.ok);
+        document.getElementById("ref-detail").textContent = gen.msg + "\n" + sol.msg;
+        drawMaze(refMaze, path, start, end);
+      })();
+
+      function bfsPath(maze, start, end) {
+        const { cols, rows, cells } = maze;
+        const prev = Array.from({ length: rows }, () => new Array(cols).fill(null));
+        const dist = Array.from({ length: rows }, () => new Array(cols).fill(-1));
+        dist[start[0]][start[1]] = 0;
+        const q = [start];
+        while (q.length) {
+          const [r, c] = q.shift();
+          for (const [nr, nc] of neighbours(cells, r, c)) {
+            if (dist[nr][nc] === -1) { dist[nr][nc] = dist[r][c] + 1; prev[nr][nc] = [r, c]; q.push([nr, nc]); }
+          }
+        }
+        const path = [];
+        let cur = end;
+        while (cur) { path.push(cur); cur = prev[cur[0]][cur[1]]; }
+        return path.reverse();
+      }
+
+      function drawMaze(maze, path, start, end) {
+        const { cols, rows, cells } = maze;
+        const cv = document.getElementById("ref-canvas");
+        const ctx = cv.getContext("2d");
+        const pad = 8, cell = (cv.width - pad * 2) / cols;
+        ctx.strokeStyle = "#8b949e";
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        for (let r = 0; r < rows; r++) {
+          for (let c = 0; c < cols; c++) {
+            const x = pad + c * cell, y = pad + r * cell, cl = cells[r][c];
+            if (!cl.N) { ctx.moveTo(x, y); ctx.lineTo(x + cell, y); }
+            if (!cl.W) { ctx.moveTo(x, y); ctx.lineTo(x, y + cell); }
+            if (!cl.E) { ctx.moveTo(x + cell, y); ctx.lineTo(x + cell, y + cell); }
+            if (!cl.S) { ctx.moveTo(x, y + cell); ctx.lineTo(x + cell, y + cell); }
+          }
+        }
+        ctx.stroke();
+        // solution path
+        ctx.strokeStyle = "#3fb950";
+        ctx.lineWidth = Math.max(1.5, cell * 0.28);
+        ctx.lineJoin = "round";
+        ctx.beginPath();
+        path.forEach(([r, c], i) => {
+          const x = pad + c * cell + cell / 2, y = pad + r * cell + cell / 2;
+          i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+      }
+
+      // ---- Test the app's hooks, if present ----------------------------------
+      function checkImplementation() {
+        let win = null;
+        try { win = document.getElementById("app").contentWindow; } catch (e) { win = null; }
+        const genFn = win && typeof win.generateMaze === "function" ? win.generateMaze : null;
+        const solveFn = win && typeof win.solveMaze === "function" ? win.solveMaze : null;
+
+        // Generator
+        const genDetail = document.getElementById("gen-detail");
+        if (!genFn) {
+          document.getElementById("gen-badge").className = "badge pending";
+          document.getElementById("gen-badge").textContent = "no hook";
+          genDetail.innerHTML = "No <code>window.generateMaze</code> found — implement &amp; expose it, or serve over HTTP to enable the check.";
+        } else {
+          try {
+            const maze = genFn(20, 20);
+            const res = validatePerfectMaze(maze);
+            setBadge("gen-badge", res.ok);
+            genDetail.textContent = res.ok ? res.msg : res.reason;
+          } catch (e) {
+            setBadge("gen-badge", false);
+            genDetail.textContent = "generateMaze threw: " + (e && e.message ? e.message : e);
+          }
+        }
+
+        // Solver — tested on a reference maze so it's independent of the generator
+        const solveDetail = document.getElementById("solve-detail");
+        if (!solveFn) {
+          document.getElementById("solve-badge").className = "badge pending";
+          document.getElementById("solve-badge").textContent = "no hook";
+          solveDetail.innerHTML = "No <code>window.solveMaze</code> found — implement &amp; expose it, or serve over HTTP to enable the check.";
+        } else {
+          try {
+            const start = [0, 0], end = [refMaze.rows - 1, refMaze.cols - 1];
+            const path = solveFn(refMaze, start, end);
+            const res = validateSolution(refMaze, path, start, end);
+            setBadge("solve-badge", res.ok);
+            solveDetail.textContent = res.ok ? res.msg : res.reason;
+          } catch (e) {
+            setBadge("solve-badge", false);
+            solveDetail.textContent = "solveMaze threw: " + (e && e.message ? e.message : e);
+          }
+        }
+      }
+
+      const app = document.getElementById("app");
+      let tries = 0;
+      function pollForHooks() {
+        let win = null;
+        try { win = app.contentWindow; } catch (e) { win = null; }
+        const ready = win && (typeof win.generateMaze === "function" || typeof win.solveMaze === "function");
+        if (ready) checkImplementation();
+        else if (tries++ < 20) setTimeout(pollForHooks, 150);
+        else checkImplementation();
+      }
+      app.addEventListener("load", pollForHooks);
+    </script>
+  </body>
+</html>
