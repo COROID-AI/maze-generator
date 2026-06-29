@@ -110,6 +110,50 @@
       }
       .stats span { color: var(--fg); }
 
+      /* ---- Size controls ---- */
+      .size-row {
+        display: flex;
+        gap: 0.5rem;
+        align-items: center;
+      }
+      .size-field {
+        display: flex;
+        flex-direction: column;
+        gap: 0.2rem;
+        flex: 1 1 0;
+      }
+      .size-field span {
+        font-size: 0.68rem;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--muted);
+      }
+      .num {
+        appearance: none;
+        font: inherit;
+        font-size: 0.85rem;
+        color: var(--fg);
+        background: var(--bg);
+        border: 1px solid var(--panel-border);
+        border-radius: 6px;
+        padding: 0.4rem 0.5rem;
+        width: 100%;
+        transition: border-color 0.15s ease;
+      }
+      .num:focus {
+        outline: none;
+        border-color: var(--accent);
+      }
+      .num.invalid {
+        border-color: #f85149;
+      }
+      .size-error {
+        font-size: 0.72rem;
+        color: #f85149;
+        min-height: 1em;
+        line-height: 1.3;
+      }
+
       /* ---- Canvas stage ---- */
       #stage {
         position: relative;
@@ -148,7 +192,17 @@
 
         <div class="group">
           <label>Maze size</label>
-          <div class="placeholder" id="size-placeholder">Adjustable size — coming soon</div>
+          <div class="size-row">
+            <div class="size-field">
+              <span>Columns</span>
+              <input id="size-cols" type="number" class="num" min="5" max="100" step="1" value="25" inputmode="numeric" aria-label="Maze columns" />
+            </div>
+            <div class="size-field">
+              <span>Rows</span>
+              <input id="size-rows" type="number" class="num" min="5" max="100" step="1" value="18" inputmode="numeric" aria-label="Maze rows" />
+            </div>
+          </div>
+          <div class="size-error" id="size-error" role="alert" aria-live="polite"></div>
         </div>
 
         <div class="group">
@@ -185,13 +239,18 @@
       const ctx = canvas.getContext("2d");
 
       // ---- Application state ------------------------------------------------
-      // Default grid dimensions (cells). Overridden by later size-control task.
-      const DEFAULT_COLS = 25;
-      const DEFAULT_ROWS = 18;
+      // Current grid dimensions (cells). Mutable via the size controls.
+      let DEFAULT_COLS = 25;
+      let DEFAULT_ROWS = 18;
+
+      // Allowed range for both dimensions (inclusive).
+      const MIN_DIM = 5;
+      const MAX_DIM = 100;
 
       // Default start (top-left) and end (bottom-right) cells.
+      // END_CELL is recomputed whenever the dimensions change.
       const START_CELL = { r: 0, c: 0 };
-      const END_CELL = { r: DEFAULT_ROWS - 1, c: DEFAULT_COLS - 1 };
+      let END_CELL = { r: DEFAULT_ROWS - 1, c: DEFAULT_COLS - 1 };
 
       /** @type {{ cols:number, rows:number, cells:Array<Array<{N:boolean,E:boolean,S:boolean,W:boolean}>> }} */
       let maze = makeEmptyMaze(DEFAULT_COLS, DEFAULT_ROWS);
@@ -594,6 +653,8 @@
         exploredIndex = 0;
         solvePath = [];
         pathIndex = 0;
+        // Keep the end cell anchored to the bottom-right of the current grid.
+        END_CELL = { r: DEFAULT_ROWS - 1, c: DEFAULT_COLS - 1 };
         maze = makeEmptyMaze(DEFAULT_COLS, DEFAULT_ROWS);
         const result = generateMazeAnimated(DEFAULT_COLS, DEFAULT_ROWS);
         carveSteps = result.steps;
@@ -628,6 +689,86 @@
 
       const btnSolve = document.getElementById("btn-solve");
       btnSolve.addEventListener("click", solve);
+
+      // ---- Size controls ----------------------------------------------------
+      // Numeric inputs for columns and rows. Values are clamped to
+      // [MIN_DIM, MAX_DIM] on change; invalid entries show an inline error
+      // and are rejected. A valid change regenerates the maze at the new size.
+      const sizeCols = document.getElementById("size-cols");
+      const sizeRows = document.getElementById("size-rows");
+      const sizeError = document.getElementById("size-error");
+
+      /**
+       * Validate + clamp a dimension input.
+       * Returns the accepted integer value, or NaN if the raw value is not a
+       * usable number (empty / non-numeric). Caller decides whether to reject.
+       * @param {HTMLInputElement} input
+       * @returns {number}
+       */
+      function parseDim(input) {
+        const raw = input.value.trim();
+        if (raw === "") return NaN;
+        // Reject anything that isn't a clean integer (no decimals, no text).
+        if (!/^-?\d+$/.test(raw)) return NaN;
+        return parseInt(raw, 10);
+      }
+
+      /**
+       * Handle a change to either dimension input. Validates both fields,
+       * shows an error for out-of-range/non-numeric values, and regenerates
+       * the maze only when both dimensions are valid.
+       */
+      function handleSizeChange() {
+        const colsRaw = parseDim(sizeCols);
+        const rowsRaw = parseDim(sizeRows);
+
+        /** @type {string[]} */
+        const problems = [];
+
+        if (Number.isNaN(colsRaw)) {
+          problems.push("Columns must be a whole number.");
+          sizeCols.classList.add("invalid");
+        } else if (colsRaw < MIN_DIM || colsRaw > MAX_DIM) {
+          problems.push("Columns must be " + MIN_DIM + "–" + MAX_DIM + ".");
+          sizeCols.classList.add("invalid");
+        } else {
+          sizeCols.classList.remove("invalid");
+        }
+
+        if (Number.isNaN(rowsRaw)) {
+          problems.push("Rows must be a whole number.");
+          sizeRows.classList.add("invalid");
+        } else if (rowsRaw < MIN_DIM || rowsRaw > MAX_DIM) {
+          problems.push("Rows must be " + MIN_DIM + "–" + MAX_DIM + ".");
+          sizeRows.classList.add("invalid");
+        } else {
+          sizeRows.classList.remove("invalid");
+        }
+
+        if (problems.length > 0) {
+          sizeError.textContent = problems.join(" ");
+          return; // reject — do not regenerate
+        }
+
+        // Both values are valid integers in range. Clamp defensively and apply.
+        sizeError.textContent = "";
+        const newCols = Math.min(MAX_DIM, Math.max(MIN_DIM, colsRaw));
+        const newRows = Math.min(MAX_DIM, Math.max(MIN_DIM, rowsRaw));
+
+        // Reflect clamped values back into the inputs.
+        sizeCols.value = String(newCols);
+        sizeRows.value = String(newRows);
+
+        // Only regenerate if the size actually changed.
+        if (newCols !== DEFAULT_COLS || newRows !== DEFAULT_ROWS) {
+          DEFAULT_COLS = newCols;
+          DEFAULT_ROWS = newRows;
+          regenerate();
+        }
+      }
+
+      sizeCols.addEventListener("change", handleSizeChange);
+      sizeRows.addEventListener("change", handleSizeChange);
 
       // ---- Boot -------------------------------------------------------------
       // Defer first sizing until layout is measured, then play the opening
