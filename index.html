@@ -199,6 +199,21 @@
         height: 100%;
       }
 
+      /* Branding footer inside the control rail. */
+      .branding {
+        margin-top: auto; /* push to the bottom of the flex column */
+        padding-top: 0.75rem;
+        border-top: 1px solid var(--panel-border);
+        font-size: 0.72rem;
+        letter-spacing: 0.04em;
+        color: var(--muted);
+        text-align: center;
+      }
+      .branding strong {
+        color: var(--accent);
+        font-weight: 600;
+      }
+
       /* Responsive: collapse the rail under the canvas on narrow screens. */
       @media (max-width: 720px) {
         #app { flex-direction: column; }
@@ -267,6 +282,8 @@
             Status: <span id="stat-status">ready</span>
           </div>
         </div>
+
+        <p class="branding">Built by <strong>Coroid</strong></p>
       </aside>
 
       <!-- Full-viewport rendering surface. -->
