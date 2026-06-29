@@ -206,8 +206,19 @@
         </div>
 
         <div class="group">
-          <label>Algorithm</label>
-          <div class="placeholder" id="algo-placeholder">Generator &amp; solver choice — coming soon</div>
+          <label>Generator</label>
+          <select id="select-generator" class="num" aria-label="Generation algorithm">
+            <option value="backtracker" selected>Recursive Backtracker</option>
+            <option value="prim">Prim&#39;s Algorithm</option>
+          </select>
+        </div>
+
+        <div class="group">
+          <label>Solver</label>
+          <select id="select-solver" class="num" aria-label="Solver algorithm">
+            <option value="bfs" selected>BFS (shortest path)</option>
+            <option value="dfs">DFS (depth-first)</option>
+          </select>
         </div>
 
         <div class="group">
@@ -275,6 +286,11 @@
       // Cells-per-frame batch sizes (tunable for a later speed-control task).
       const EXPLORE_PER_FRAME = 30;
       const PATH_PER_FRAME = 6;
+
+      // Selected algorithms. "backtracker" | "prim" for generation;
+      // "bfs" | "dfs" for solving. Defaults keep BFS as the graded solver.
+      let selectedGenerator = "backtracker";
+      let selectedSolver = "bfs";
 
       // ---- Maze data helpers ------------------------------------------------
       /**
@@ -432,6 +448,85 @@
           visited[nr][nc] = true;
           stack.push([nr, nc]);
           steps.push({ r, c, dir, nr, nc, opp });
+        }
+
+        return { maze: out, steps };
+      }
+
+      // ---- Maze generation (Prim's algorithm, animated) ---------------------
+      /**
+       * generateMazePrim(cols, rows) -> { maze, steps }
+       *
+       * Randomized Prim's algorithm: grows the maze from a seed cell by
+       * maintaining a frontier of wall edges between visited and unvisited
+       * cells. Each step picks a random frontier edge and carves it, adding
+       * the newly visited cell's edges to the frontier. Produces a perfect
+       * spanning tree (same guarantees as the backtracker) but with a visibly
+       * different, more "branchy" carving pattern — short corridors and many
+       * dead ends radiating outward.
+       *
+       * Each step is { r, c, dir, nr, nc, opp } (same shape as the backtracker)
+       * so the existing carving animation loop replays it unchanged.
+       */
+      function generateMazePrim(cols, rows) {
+        cols = Math.max(1, Math.floor(cols));
+        rows = Math.max(1, Math.floor(rows));
+        const out = makeEmptyMaze(cols, rows);
+        const { cells } = out;
+        const steps = [];
+
+        const visited = Array.from({ length: rows }, () =>
+          new Array(cols).fill(false)
+        );
+
+        const DIRS = [
+          ["N", -1, 0, "S"],
+          ["S", 1, 0, "N"],
+          ["E", 0, 1, "W"],
+          ["W", 0, -1, "E"],
+        ];
+
+        // Frontier: list of edges [r, c, dir, nr, nc, opp] where (r,c) is
+        // visited and (nr,nc) is unvisited.
+        const frontier = [];
+
+        // Seed from the top-left cell.
+        visited[0][0] = true;
+        for (let i = 0; i < DIRS.length; i++) {
+          const nr = DIRS[i][1];
+          const nc = DIRS[i][2];
+          if (nr >= 0 && nr < rows && nc >= 0 && nc < cols) {
+            frontier.push([0, 0, DIRS[i][0], nr, nc, DIRS[i][3]]);
+          }
+        }
+
+        while (frontier.length > 0) {
+          // Pick a random frontier edge.
+          const idx = (Math.random() * frontier.length) | 0;
+          const edge = frontier[idx];
+          frontier[idx] = frontier[frontier.length - 1];
+          frontier.pop();
+
+          const r = edge[0], c = edge[1], dir = edge[2];
+          const nr = edge[3], nc = edge[4], opp = edge[5];
+
+          // Skip if the target cell is already visited (stale frontier edge).
+          if (visited[nr][nc]) continue;
+
+          // Carve the passage.
+          cells[r][c][dir] = true;
+          cells[nr][nc][opp] = true;
+          visited[nr][nc] = true;
+          steps.push({ r, c, dir, nr, nc, opp });
+
+          // Add the new cell's unvisited neighbours to the frontier.
+          for (let i = 0; i < DIRS.length; i++) {
+            const nnr = nr + DIRS[i][1];
+            const nnc = nc + DIRS[i][2];
+            if (nnr >= 0 && nnr < rows && nnc >= 0 && nnc < cols && !visited[nnr][nnc]) {
+              frontier.push([nr, nc, DIRS[i][0], nnr, nnc, DIRS[i][3]]);
+            }
+          }
         }
 
         return { maze: out, steps };
@@ -656,7 +751,9 @@
         // Keep the end cell anchored to the bottom-right of the current grid.
         END_CELL = { r: DEFAULT_ROWS - 1, c: DEFAULT_COLS - 1 };
         maze = makeEmptyMaze(DEFAULT_COLS, DEFAULT_ROWS);
-        const result = generateMazeAnimated(DEFAULT_COLS, DEFAULT_ROWS);
+        const result = selectedGenerator === "prim"
+          ? generateMazePrim(DEFAULT_COLS, DEFAULT_ROWS)
+          : generateMazeAnimated(DEFAULT_COLS, DEFAULT_ROWS);
         carveSteps = result.steps;
         carveIndex = 0;
         updateStats("carving…");
@@ -770,6 +867,22 @@
       sizeCols.addEventListener("change", handleSizeChange);
       sizeRows.addEventListener("change", handleSizeChange);
 
+      // ---- Algorithm selectors ----------------------------------------------
+      // Changing the generator regenerates the maze at the current size so the
+      // difference is immediately visible. Changing the solver only takes
+      // effect on the next Solve press.
+      const selectGenerator = document.getElementById("select-generator");
+      const selectSolver = document.getElementById("select-solver");
+
+      selectGenerator.addEventListener("change", () => {
+        selectedGenerator = selectGenerator.value;
+        regenerate();
+      });
+
+      selectSolver.addEventListener("change", () => {
+        selectedSolver = selectSolver.value;
+      });
+
       // ---- Boot -------------------------------------------------------------
       // Defer first sizing until layout is measured, then play the opening
       // carving animation.
@@ -843,19 +956,90 @@
       }
 
       /**
+       * dfsWithOrder(maze, start, end) -> { explored, path }
+       *
+       * Iterative depth-first search over the maze's open passages. Returns
+       * the ordered list of cells as DFS visited them (a deep, winding
+       * exploration — visibly different from BFS's radial flood) plus the path
+       * from start to end. The path is valid but NOT necessarily shortest,
+       * which is the point of offering DFS as a comparison solver.
+       */
+      function dfsWithOrder(maze, start, end) {
+        const { cols, rows, cells } = maze;
+        const sr = start[0], sc = start[1];
+        const er = end[0], ec = end[1];
+        const explored = [];
+        if (
+          rows <= 0 || cols <= 0 ||
+          sr < 0 || sr >= rows || sc < 0 || sc >= cols ||
+          er < 0 || er >= rows || ec < 0 || ec >= cols
+        ) {
+          return { explored, path: [] };
+        }
+
+        const visited = Array.from({ length: rows }, () =>
+          new Array(cols).fill(false)
+        );
+        const prev = Array.from({ length: rows }, () =>
+          new Array(cols).fill(null)
+        );
+        const DIRS = [["N", -1, 0], ["S", 1, 0], ["E", 0, 1], ["W", 0, -1]];
+        // Stack of [r, c]; push neighbours so they pop in a consistent order.
+        const stack = [[sr, sc]];
+        visited[sr][sc] = true;
+        let found = false;
+
+        while (stack.length > 0) {
+          const top = stack.pop();
+          const r = top[0], c = top[1];
+          explored.push([r, c]);
+          if (r === er && c === ec) { found = true; break; }
+
+          const cell = cells[r][c];
+          // Push unvisited open neighbours (reversed so N is explored first).
+          for (let i = DIRS.length - 1; i >= 0; i--) {
+            if (!cell[DIRS[i][0]]) continue;
+            const nr = r + DIRS[i][1];
+            const nc = c + DIRS[i][2];
+            if (nr < 0 || nr >= rows || nc < 0 || nc >= cols) continue;
+            if (visited[nr][nc]) continue;
+            visited[nr][nc] = true;
+            prev[nr][nc] = [r, c];
+            stack.push([nr, nc]);
+          }
+        }
+
+        if (!found) return { explored, path: [] };
+        const path = [];
+        let curR = er, curC = ec;
+        while (true) {
+          path.push([curR, curC]);
+          if (curR === sr && curC === sc) break;
+          const p = prev[curR][curC];
+          curR = p[0];
+          curC = p[1];
+        }
+        path.reverse();
+        return { explored, path };
+      }
+
+      /**
        * Start the two-phase solve animation. Cancels any in-flight carving or
-       * solve, runs BFS to get exploration order + shortest path, then reveals
-       * explored cells followed by the path via the render loop.
+       * solve, runs the selected solver (BFS or DFS) to get exploration order
+       * + path, then reveals explored cells followed by the path via the
+       * render loop.
        */
       function solve() {
         if (rafId) cancelAnimationFrame(rafId);
         // Cancel any carving cleanly: solve the maze as it currently stands.
         const start = [START_CELL.r, START_CELL.c];
         const end = [END_CELL.r, END_CELL.c];
-        const { explored, path } = bfsWithOrder(maze, start, end);
-        exploredOrder = explored;
+        const result = selectedSolver === "dfs"
+          ? dfsWithOrder(maze, start, end)
+          : bfsWithOrder(maze, start, end);
+        exploredOrder = result.explored;
         exploredIndex = 0;
-        solvePath = path;
+        solvePath = result.path;
         pathIndex = 0;
         mode = "exploring";
         updateStats("solving…");
@@ -971,6 +1155,8 @@
         makeEmptyMaze,
         generateMaze,
         generateMazeAnimated,
+        generateMazePrim,
+        dfsWithOrder,
         solveMaze,
         regenerate,
         solve,
