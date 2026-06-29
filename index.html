@@ -154,6 +154,35 @@
         line-height: 1.3;
       }
 
+      /* ---- Speed slider ---- */
+      #speed-slider {
+        appearance: none;
+        width: 100%;
+        height: 6px;
+        background: var(--bg);
+        border: 1px solid var(--panel-border);
+        border-radius: 999px;
+        outline: none;
+        cursor: pointer;
+      }
+      #speed-slider::-webkit-slider-thumb {
+        appearance: none;
+        width: 16px;
+        height: 16px;
+        border-radius: 50%;
+        background: var(--accent);
+        border: none;
+        cursor: pointer;
+      }
+      #speed-slider::-moz-range-thumb {
+        width: 16px;
+        height: 16px;
+        border-radius: 50%;
+        background: var(--accent);
+        border: none;
+        cursor: pointer;
+      }
+
       /* ---- Canvas stage ---- */
       #stage {
         position: relative;
@@ -182,7 +211,7 @@
            stable layout scaffold. -->
       <aside id="panel" aria-label="Controls">
         <h1>Maze Generator &amp; Solver</h1>
-        <p class="hint">Watch a perfect maze carve itself, then animate the shortest path. Controls arrive in the next steps.</p>
+        <p class="hint">Watch a perfect maze carve itself, then animate the shortest path. Click any cell to set start/end points.</p>
 
         <div class="group">
           <label>Controls</label>
@@ -214,6 +243,12 @@
         </div>
 
         <div class="group">
+          <label>Animation speed</label>
+          <input id="speed-slider" type="range" min="1" max="100" step="1" value="50" aria-label="Animation speed" />
+          <div class="hint" id="speed-label">Speed: 50%</div>
+        </div>
+
+        <div class="group">
           <label>Solver</label>
           <select id="select-solver" class="num" aria-label="Solver algorithm">
             <option value="bfs" selected>BFS (shortest path)</option>
@@ -227,6 +262,7 @@
             Cells: <span id="stat-cells">—</span><br />
             Explored: <span id="stat-explored">—</span><br />
             Path length: <span id="stat-path">—</span><br />
+            Generation time: <span id="stat-gen-time">—</span><br />
             Status: <span id="stat-status">ready</span>
           </div>
         </div>
@@ -283,9 +319,16 @@
       // Final shortest path [row, col] pairs, revealed after exploration.
       let solvePath = [];
       let pathIndex = 0;
-      // Cells-per-frame batch sizes (tunable for a later speed-control task).
+      // Cells-per-frame batch sizes at 100% speed (tunable).
       const EXPLORE_PER_FRAME = 30;
       const PATH_PER_FRAME = 6;
+
+      // Animation speed multiplier (1–100%). Scales the per-frame batch sizes
+      // for both generation and solving. Bound to the speed slider.
+      let animSpeed = 50;
+
+      // Tracks generation time (ms) for the stats panel.
+      let genTimeMs = 0;
 
       // Selected algorithms. "backtracker" | "prim" for generation;
       // "bfs" | "dfs" for solving. Defaults keep BFS as the graded solver.
@@ -695,10 +738,18 @@
       // finishes carving in ~1s without frame drops.
       const STEPS_PER_FRAME = 12;
 
+      // Speed-scaled batch sizes: at 100% speed use the full base batch; at
+      // lower speeds scale down (min 1 so animation never stalls). This gives
+      // a smooth, continuous speed control for both generation and solving.
+      function speedScale(base) {
+        return Math.max(1, Math.round(base * (animSpeed / 100)));
+      }
+
       function frame() {
         if (mode === "carving") {
           const cells = maze.cells;
-          for (let i = 0; i < STEPS_PER_FRAME && carveIndex < carveSteps.length; i++) {
+          const batch = speedScale(STEPS_PER_FRAME);
+          for (let i = 0; i < batch && carveIndex < carveSteps.length; i++) {
             const s = carveSteps[carveIndex++];
             cells[s.r][s.c][s.dir] = true;
             cells[s.nr][s.nc][s.opp] = true;
@@ -709,7 +760,7 @@
           }
         } else if (mode === "exploring") {
           // Reveal a batch of explored cells per frame (BFS flood order).
-          const target = Math.min(exploredIndex + EXPLORE_PER_FRAME, exploredOrder.length);
+          const target = Math.min(exploredIndex + speedScale(EXPLORE_PER_FRAME), exploredOrder.length);
           exploredIndex = target;
           updateStats("solving…");
           if (exploredIndex >= exploredOrder.length) {
@@ -723,7 +774,7 @@
           }
         } else if (mode === "pathing") {
           // Reveal the shortest path cells on top of the explored flood.
-          const target = Math.min(pathIndex + PATH_PER_FRAME, solvePath.length);
+          const target = Math.min(pathIndex + speedScale(PATH_PER_FRAME), solvePath.length);
           pathIndex = target;
           updateStats("solving…");
           if (pathIndex >= solvePath.length) {
@@ -751,9 +802,12 @@
         // Keep the end cell anchored to the bottom-right of the current grid.
         END_CELL = { r: DEFAULT_ROWS - 1, c: DEFAULT_COLS - 1 };
         maze = makeEmptyMaze(DEFAULT_COLS, DEFAULT_ROWS);
+        // Measure generation time (algorithm compute, not animation playback).
+        const genStart = performance.now();
         const result = selectedGenerator === "prim"
           ? generateMazePrim(DEFAULT_COLS, DEFAULT_ROWS)
           : generateMazeAnimated(DEFAULT_COLS, DEFAULT_ROWS);
+        genTimeMs = performance.now() - genStart;
         carveSteps = result.steps;
         carveIndex = 0;
         updateStats("carving…");
@@ -776,6 +830,8 @@
           hasSolved ? exploredIndex : "—";
         document.getElementById("stat-path").textContent =
           hasSolved ? pathIndex : "—";
+        document.getElementById("stat-gen-time").textContent =
+          genTimeMs > 0 ? genTimeMs.toFixed(1) + " ms" : "—";
 
         if (status) document.getElementById("stat-status").textContent = status;
       }
@@ -881,6 +937,62 @@
 
       selectSolver.addEventListener("change", () => {
         selectedSolver = selectSolver.value;
+      });
+
+      // ---- Speed slider -----------------------------------------------------
+      // Adjusts the per-frame batch size for both generation and solve
+      // animations. Higher = faster (more steps per frame).
+      const speedSlider = document.getElementById("speed-slider");
+      const speedLabel = document.getElementById("speed-label");
+      speedSlider.addEventListener("input", () => {
+        animSpeed = parseInt(speedSlider.value, 10);
+        speedLabel.textContent = "Speed: " + animSpeed + "%";
+      });
+
+      // ---- Click-to-place start/end -----------------------------------------
+      // Clicking a cell toggles which endpoint is being set: first click sets
+      // start, second sets end, third sets start again, etc. The two endpoints
+      // are always kept distinct (clicking the cell occupied by the other
+      // endpoint swaps roles instead of overlapping).
+      let placing = "start"; // which endpoint the next click assigns
+
+      canvas.addEventListener("click", (e) => {
+        // Ignore clicks while an animation is in flight to avoid visual chaos.
+        if (mode !== "idle") return;
+
+        const rect = canvas.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+        const { cell, offsetX, offsetY } = gridMetrics();
+        const c = Math.floor((x - offsetX) / cell);
+        const r = Math.floor((y - offsetY) / cell);
+
+        // Reject clicks outside the grid bounds.
+        if (r < 0 || r >= maze.rows || c < 0 || c >= maze.cols) return;
+
+        if (placing === "start") {
+          // If the clicked cell is currently the end, move end to old start.
+          if (r === END_CELL.r && c === END_CELL.c) {
+            END_CELL = { r: START_CELL.r, c: START_CELL.c };
+          }
+          START_CELL = { r, c };
+          placing = "end";
+        } else {
+          // If the clicked cell is currently the start, move start to old end.
+          if (r === START_CELL.r && c === START_CELL.c) {
+            START_CELL = { r: END_CELL.r, c: END_CELL.c };
+          }
+          END_CELL = { r, c };
+          placing = "start";
+        }
+
+        // Clear any previous solve overlay so the new endpoints are clean.
+        exploredOrder = [];
+        exploredIndex = 0;
+        solvePath = [];
+        pathIndex = 0;
+        render();
+        updateStats("ready");
       });
 
       // ---- Boot -------------------------------------------------------------
