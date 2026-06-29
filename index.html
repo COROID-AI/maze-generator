@@ -19,6 +19,8 @@
         --accent-soft: rgba(88, 166, 255, 0.18);
         --wall: #c9d1d9;
         --cell: #05070d;
+        --explored: rgba(88, 166, 255, 0.22);
+        --path: rgba(63, 185, 80, 0.55);
         --radius: 10px;
         font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
           Helvetica, Arial, sans-serif;
@@ -141,7 +143,7 @@
         <div class="group">
           <label>Controls</label>
           <button id="btn-regenerate" type="button" class="btn">Regenerate</button>
-          <div class="placeholder" id="solve-placeholder">Solve — coming soon</div>
+          <button id="btn-solve" type="button" class="btn">Solve</button>
         </div>
 
         <div class="group">
@@ -158,6 +160,8 @@
           <label>Stats</label>
           <div class="stats" id="stats">
             Cells: <span id="stat-cells">—</span><br />
+            Explored: <span id="stat-explored">—</span><br />
+            Path length: <span id="stat-path">—</span><br />
             Status: <span id="stat-status">ready</span>
           </div>
         </div>
@@ -198,6 +202,20 @@
       let animating = false;
       let carveSteps = [];
       let carveIndex = 0;
+
+      // Solve animation state. Kept separate from the maze object so the
+      // acceptance hook (solveMaze) stays pure. `mode` is one of:
+      //   "idle" | "carving" | "exploring" | "pathing"
+      let mode = "idle";
+      // Ordered list of [row, col] cells as BFS visited them (exploration flood).
+      let exploredOrder = [];
+      let exploredIndex = 0;
+      // Final shortest path [row, col] pairs, revealed after exploration.
+      let solvePath = [];
+      let pathIndex = 0;
+      // Cells-per-frame batch sizes (tunable for a later speed-control task).
+      const EXPLORE_PER_FRAME = 30;
+      const PATH_PER_FRAME = 6;
 
       // ---- Maze data helpers ------------------------------------------------
       /**
@@ -465,7 +483,41 @@
         );
       }
 
-      /** Full frame: clear stage, draw grid + endpoints. Called by render loop + resize. */
+      /**
+       * Paint the cells visited by BFS so far (up to exploredIndex) in the
+       * explored color. Called every frame while mode === "exploring" or after.
+       */
+      function drawExplored() {
+        if (exploredIndex === 0) return;
+        const { cell, offsetX, offsetY } = gridMetrics();
+        ctx.fillStyle = getComputedStyle(document.documentElement)
+          .getPropertyValue("--explored")
+          .trim() || "rgba(88,166,255,0.22)";
+        for (let i = 0; i < exploredIndex; i++) {
+          const [r, c] = exploredOrder[i];
+          ctx.fillRect(offsetX + c * cell, offsetY + r * cell, cell, cell);
+        }
+      }
+
+      /**
+       * Paint the revealed portion of the shortest path (up to pathIndex) in
+       * the path color. Drawn on top of explored cells so the final route
+       * stands out.
+       */
+      function drawPath() {
+        if (pathIndex === 0) return;
+        const { cell, offsetX, offsetY } = gridMetrics();
+        ctx.fillStyle = getComputedStyle(document.documentElement)
+          .getPropertyValue("--path")
+          .trim() || "rgba(63,185,80,0.55)";
+        for (let i = 0; i < pathIndex; i++) {
+          const [r, c] = solvePath[i];
+          ctx.fillRect(offsetX + c * cell, offsetY + r * cell, cell, cell);
+        }
+      }
+
+      /** Full frame: clear stage, draw grid + endpoints. Called by render loop + resize.
+       *  Paint order: backdrop → explored → path → walls → endpoints (last). */
       function render() {
         const m = gridMetrics();
         ctx.clearRect(0, 0, m.width, m.height);
@@ -474,8 +526,10 @@
           .getPropertyValue("--cell")
           .trim() || "#05070d";
         ctx.fillRect(m.offsetX, m.offsetY, m.gridW, m.gridH);
-        drawEndpoints();
+        drawExplored();
+        drawPath();
         drawGrid(maze.cells);
+        drawEndpoints();
       }
 
       // ---- Render loop ------------------------------------------------------
@@ -488,7 +542,7 @@
       const STEPS_PER_FRAME = 12;
 
       function frame() {
-        if (animating) {
+        if (mode === "carving") {
           const cells = maze.cells;
           for (let i = 0; i < STEPS_PER_FRAME && carveIndex < carveSteps.length; i++) {
             const s = carveSteps[carveIndex++];
@@ -496,8 +550,31 @@
             cells[s.nr][s.nc][s.opp] = true;
           }
           if (carveIndex >= carveSteps.length) {
-            animating = false;
+            mode = "idle";
             updateStats("ready");
+          }
+        } else if (mode === "exploring") {
+          // Reveal a batch of explored cells per frame (BFS flood order).
+          const target = Math.min(exploredIndex + EXPLORE_PER_FRAME, exploredOrder.length);
+          exploredIndex = target;
+          updateStats("solving…");
+          if (exploredIndex >= exploredOrder.length) {
+            if (solvePath.length === 0) {
+              // No path exists (e.g. solving a partially carved maze).
+              mode = "idle";
+              updateStats("no path");
+            } else {
+              mode = "pathing";
+            }
+          }
+        } else if (mode === "pathing") {
+          // Reveal the shortest path cells on top of the explored flood.
+          const target = Math.min(pathIndex + PATH_PER_FRAME, solvePath.length);
+          pathIndex = target;
+          updateStats("solving…");
+          if (pathIndex >= solvePath.length) {
+            mode = "idle";
+            updateStats("solved");
           }
         }
         render();
@@ -511,11 +588,16 @@
        */
       function regenerate() {
         if (rafId) cancelAnimationFrame(rafId);
+        // Reset all animation state so a mid-solve Regenerate is clean.
+        mode = "carving";
+        exploredOrder = [];
+        exploredIndex = 0;
+        solvePath = [];
+        pathIndex = 0;
         maze = makeEmptyMaze(DEFAULT_COLS, DEFAULT_ROWS);
         const result = generateMazeAnimated(DEFAULT_COLS, DEFAULT_ROWS);
         carveSteps = result.steps;
         carveIndex = 0;
-        animating = true;
         updateStats("carving…");
         rafId = requestAnimationFrame(frame);
       }
@@ -524,12 +606,19 @@
       function updateStats(status) {
         document.getElementById("stat-cells").textContent =
           maze.cols * maze.rows;
+        document.getElementById("stat-explored").textContent =
+          exploredOrder.length > 0 ? exploredIndex : (mode === "idle" && solvePath.length === 0 ? "—" : exploredIndex);
+        document.getElementById("stat-path").textContent =
+          solvePath.length > 0 ? pathIndex : (mode === "idle" && exploredOrder.length === 0 ? "—" : 0);
         if (status) document.getElementById("stat-status").textContent = status;
       }
 
       // ---- Controls ---------------------------------------------------------
       const btnRegenerate = document.getElementById("btn-regenerate");
       btnRegenerate.addEventListener("click", regenerate);
+
+      const btnSolve = document.getElementById("btn-solve");
+      btnSolve.addEventListener("click", solve);
 
       // ---- Boot -------------------------------------------------------------
       // Defer first sizing until layout is measured, then play the opening
@@ -539,6 +628,89 @@
         resizeCanvas();
         regenerate();
       });
+
+      // ---- Animated solve (BFS exploration flood + path reveal) ------------
+      /**
+       * bfsWithOrder(maze, start, end) -> { explored, path }
+       *
+       * Same BFS as solveMaze() but also returns the ordered list of cells as
+       * BFS dequeued them (the exploration flood order). `path` is the shortest
+       * path (empty if unreachable). Used only by the animated solver; the
+       * pure solveMaze() acceptance hook is unchanged.
+       */
+      function bfsWithOrder(maze, start, end) {
+        const { cols, rows, cells } = maze;
+        const sr = start[0], sc = start[1];
+        const er = end[0], ec = end[1];
+        const explored = [];
+        if (
+          rows <= 0 || cols <= 0 ||
+          sr < 0 || sr >= rows || sc < 0 || sc >= cols ||
+          er < 0 || er >= rows || ec < 0 || ec >= cols
+        ) {
+          return { explored, path: [] };
+        }
+
+        const prev = Array.from({ length: rows }, () => new Array(cols).fill(null));
+        const visited = Array.from({ length: rows }, () => new Array(cols).fill(false));
+        const queue = [sr * cols + sc];
+        visited[sr][sc] = true;
+        const DIRS = [["N", -1, 0], ["S", 1, 0], ["E", 0, 1], ["W", 0, -1]];
+        let head = 0;
+        let found = false;
+
+        while (head < queue.length) {
+          const cur = queue[head++];
+          const r = (cur / cols) | 0;
+          const c = cur - r * cols;
+          explored.push([r, c]);
+          if (r === er && c === ec) { found = true; break; }
+          const cell = cells[r][c];
+          for (let i = 0; i < DIRS.length; i++) {
+            if (!cell[DIRS[i][0]]) continue;
+            const nr = r + DIRS[i][1];
+            const nc = c + DIRS[i][2];
+            if (nr < 0 || nr >= rows || nc < 0 || nc >= cols) continue;
+            if (visited[nr][nc]) continue;
+            visited[nr][nc] = true;
+            prev[nr][nc] = [r, c];
+            queue.push(nr * cols + nc);
+          }
+        }
+
+        if (!found) return { explored, path: [] };
+        const path = [];
+        let curR = er, curC = ec;
+        while (true) {
+          path.push([curR, curC]);
+          if (curR === sr && curC === sc) break;
+          const p = prev[curR][curC];
+          curR = p[0];
+          curC = p[1];
+        }
+        path.reverse();
+        return { explored, path };
+      }
+
+      /**
+       * Start the two-phase solve animation. Cancels any in-flight carving or
+       * solve, runs BFS to get exploration order + shortest path, then reveals
+       * explored cells followed by the path via the render loop.
+       */
+      function solve() {
+        if (rafId) cancelAnimationFrame(rafId);
+        // Cancel any carving cleanly: solve the maze as it currently stands.
+        const start = [START_CELL.r, START_CELL.c];
+        const end = [END_CELL.r, END_CELL.c];
+        const { explored, path } = bfsWithOrder(maze, start, end);
+        exploredOrder = explored;
+        exploredIndex = 0;
+        solvePath = path;
+        pathIndex = 0;
+        mode = "exploring";
+        updateStats("solving…");
+        rafId = requestAnimationFrame(frame);
+      }
 
       // ---- Maze solver (BFS shortest path) ----------------------------------
       /**
@@ -651,6 +823,7 @@
         generateMazeAnimated,
         solveMaze,
         regenerate,
+        solve,
         gridMetrics,
       };
     </script>
