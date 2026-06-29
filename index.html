@@ -189,6 +189,86 @@
         return { cols, rows, cells };
       }
 
+      // ---- Maze generation (recursive backtracker) --------------------------
+      /**
+       * generateMaze(cols, rows) -> { cols, rows, cells }
+       *
+       * Pure recursive-backtracker (iterative, stack-based) perfect-maze
+       * generator. Produces a spanning tree over the cols×rows grid:
+       *   • every cell is reachable from every other cell, and
+       *   • exactly cols*rows - 1 open passages exist (no loops).
+       *
+       * Each cell keeps four symmetric booleans (N/E/S/W); carving a passage
+       * opens both sides at once and never crosses the grid border, so the
+       * result is always symmetric and in-bounds. DOM-free and deterministic
+       * given Math.random's state.
+       *
+       * @param {number} cols
+       * @param {number} rows
+       * @returns {{cols:number, rows:number, cells:Array<Array<{N:boolean,E:boolean,S:boolean,W:boolean}>>}}
+       */
+      function generateMaze(cols, rows) {
+        cols = Math.max(1, Math.floor(cols));
+        rows = Math.max(1, Math.floor(rows));
+        const maze = makeEmptyMaze(cols, rows);
+        const { cells } = maze;
+
+        // visited[r][c] === true once a cell has been entered.
+        const visited = Array.from({ length: rows }, () =>
+          new Array(cols).fill(false)
+        );
+
+        // [dir, dRow, dCol, oppositeDir]
+        const DIRS = [
+          ["N", -1, 0, "S"],
+          ["S", 1, 0, "N"],
+          ["E", 0, 1, "W"],
+          ["W", 0, -1, "E"],
+        ];
+
+        // Start the walk at the top-left cell.
+        const stack = [[0, 0]];
+        visited[0][0] = true;
+
+        while (stack.length) {
+          const [r, c] = stack[stack.length - 1];
+
+          // Collect unvisited in-bounds neighbours.
+          const options = [];
+          for (let i = 0; i < DIRS.length; i++) {
+            const dir = DIRS[i][0];
+            const dr = DIRS[i][1];
+            const dc = DIRS[i][2];
+            const opp = DIRS[i][3];
+            const nr = r + dr;
+            const nc = c + dc;
+            if (nr >= 0 && nr < rows && nc >= 0 && nc < cols && !visited[nr][nc]) {
+              options.push([dir, nr, nc, opp]);
+            }
+          }
+
+          if (options.length === 0) {
+            // Dead end: backtrack.
+            stack.pop();
+            continue;
+          }
+
+          // Carve a passage to a random unvisited neighbour.
+          const choice = options[(Math.random() * options.length) | 0];
+          const dir = choice[0];
+          const nr = choice[1];
+          const nc = choice[2];
+          const opp = choice[3];
+
+          cells[r][c][dir] = true; // open our side
+          cells[nr][nc][opp] = true; // open their side (keeps symmetry)
+          visited[nr][nc] = true;
+          stack.push([nr, nc]);
+        }
+
+        return maze;
+      }
+
       // ---- Canvas sizing ----------------------------------------------------
       /** Device-pixel-ratio aware resize so walls stay crisp on HiDPI. */
       function resizeCanvas() {
@@ -306,7 +386,7 @@
       });
 
       // Expose stable hooks for later tasks + the optional test harness.
-      // (Generator/solver bodies are added by subsequent tasks.)
+      window.generateMaze = generateMaze; // perfect-maze generator (acceptance hook)
       window.__maze = {
         canvas,
         ctx,
@@ -315,6 +395,7 @@
         drawGrid,
         render,
         makeEmptyMaze,
+        generateMaze,
         gridMetrics,
       };
     </script>
