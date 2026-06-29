@@ -603,13 +603,22 @@
       }
 
       // ---- Stats ------------------------------------------------------------
+      // Clean stat rules:
+      //   • explored: show progressive exploredIndex once a solve has started;
+      //     "—" before any solve has ever run.
+      //   • path: show progressive pathIndex once a path exists; "—" before
+      //     any solve has ever run.
+      //   • When fully idle after a solve, the indices equal the final totals.
       function updateStats(status) {
         document.getElementById("stat-cells").textContent =
           maze.cols * maze.rows;
+
+        const hasSolved = exploredOrder.length > 0 || solvePath.length > 0;
         document.getElementById("stat-explored").textContent =
-          exploredOrder.length > 0 ? exploredIndex : (mode === "idle" && solvePath.length === 0 ? "—" : exploredIndex);
+          hasSolved ? exploredIndex : "—";
         document.getElementById("stat-path").textContent =
-          solvePath.length > 0 ? pathIndex : (mode === "idle" && exploredOrder.length === 0 ? "—" : 0);
+          hasSolved ? pathIndex : "—";
+
         if (status) document.getElementById("stat-status").textContent = status;
       }
 
