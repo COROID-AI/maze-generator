@@ -85,6 +85,22 @@
         border: 1px dashed var(--panel-border);
         border-radius: 6px;
       }
+      .btn {
+        appearance: none;
+        font: inherit;
+        font-size: 0.85rem;
+        font-weight: 600;
+        color: var(--fg);
+        background: var(--accent-soft);
+        border: 1px solid var(--accent);
+        border-radius: 8px;
+        padding: 0.55rem 0.9rem;
+        cursor: pointer;
+        transition: background 0.15s ease, transform 0.05s ease;
+      }
+      .btn:hover { background: rgba(88, 166, 255, 0.28); }
+      .btn:active { transform: translateY(1px); }
+      .btn:disabled { opacity: 0.5; cursor: not-allowed; }
       .stats {
         font-size: 0.8rem;
         color: var(--muted);
@@ -124,7 +140,8 @@
 
         <div class="group">
           <label>Controls</label>
-          <div class="placeholder" id="ctrl-placeholder">Regenerate / Solve — coming soon</div>
+          <button id="btn-regenerate" type="button" class="btn">Regenerate</button>
+          <div class="placeholder" id="solve-placeholder">Solve — coming soon</div>
         </div>
 
         <div class="group">
@@ -168,8 +185,19 @@
       const DEFAULT_COLS = 25;
       const DEFAULT_ROWS = 18;
 
+      // Default start (top-left) and end (bottom-right) cells.
+      const START_CELL = { r: 0, c: 0 };
+      const END_CELL = { r: DEFAULT_ROWS - 1, c: DEFAULT_COLS - 1 };
+
       /** @type {{ cols:number, rows:number, cells:Array<Array<{N:boolean,E:boolean,S:boolean,W:boolean}>> }} */
       let maze = makeEmptyMaze(DEFAULT_COLS, DEFAULT_ROWS);
+
+      // Carving animation state. `animating` is true while a generation run
+      // is in flight; `carveSteps` holds the ordered list of carve operations
+      // produced by generateMazeAnimated().
+      let animating = false;
+      let carveSteps = [];
+      let carveIndex = 0;
 
       // ---- Maze data helpers ------------------------------------------------
       /**
@@ -269,6 +297,69 @@
         return maze;
       }
 
+      // ---- Animated generation (recursive backtracker w/ recorded steps) ----
+      /**
+       * generateMazeAnimated(cols, rows) -> { maze, steps }
+       *
+       * Same perfect-maze algorithm as generateMaze(), but records each carve
+       * operation in order so the renderer can replay them as an animation.
+       * Each step is { r, c, dir, nr, nc, opp }: "open dir on (r,c) and opp on
+       * (nr,nc)". The returned maze is fully carved (a perfect spanning tree);
+       * callers may ignore `steps` for an instant result.
+       */
+      function generateMazeAnimated(cols, rows) {
+        cols = Math.max(1, Math.floor(cols));
+        rows = Math.max(1, Math.floor(rows));
+        const out = makeEmptyMaze(cols, rows);
+        const { cells } = out;
+        const steps = [];
+
+        const visited = Array.from({ length: rows }, () =>
+          new Array(cols).fill(false)
+        );
+
+        const DIRS = [
+          ["N", -1, 0, "S"],
+          ["S", 1, 0, "N"],
+          ["E", 0, 1, "W"],
+          ["W", 0, -1, "E"],
+        ];
+
+        const stack = [[0, 0]];
+        visited[0][0] = true;
+
+        while (stack.length) {
+          const [r, c] = stack[stack.length - 1];
+          const options = [];
+          for (let i = 0; i < DIRS.length; i++) {
+            const nr = r + DIRS[i][1];
+            const nc = c + DIRS[i][2];
+            if (nr >= 0 && nr < rows && nc >= 0 && nc < cols && !visited[nr][nc]) {
+              options.push([DIRS[i][0], nr, nc, DIRS[i][3]]);
+            }
+          }
+
+          if (options.length === 0) {
+            stack.pop();
+            continue;
+          }
+
+          const choice = options[(Math.random() * options.length) | 0];
+          const dir = choice[0];
+          const nr = choice[1];
+          const nc = choice[2];
+          const opp = choice[3];
+
+          cells[r][c][dir] = true;
+          cells[nr][nc][opp] = true;
+          visited[nr][nc] = true;
+          stack.push([nr, nc]);
+          steps.push({ r, c, dir, nr, nc, opp });
+        }
+
+        return { maze: out, steps };
+      }
+
       // ---- Canvas sizing ----------------------------------------------------
       /** Device-pixel-ratio aware resize so walls stay crisp on HiDPI. */
       function resizeCanvas() {
@@ -349,7 +440,32 @@
         ctx.lineTo(x2, y2);
       }
 
-      /** Full frame: clear stage, draw grid. Called by render loop + resize. */
+      /**
+       * Highlight the default start (top-left) and end (bottom-right) cells so
+       * they are visually distinct from the rest of the grid.
+       */
+      function drawEndpoints() {
+        const { cell, offsetX, offsetY } = gridMetrics();
+        const pad = Math.max(2, cell * 0.18);
+        // Start cell — green (top-left).
+        ctx.fillStyle = "#3fb950";
+        ctx.fillRect(
+          offsetX + START_CELL.c * cell + pad,
+          offsetY + START_CELL.r * cell + pad,
+          cell - pad * 2,
+          cell - pad * 2
+        );
+        // End cell — amber (bottom-right).
+        ctx.fillStyle = "#f0883e";
+        ctx.fillRect(
+          offsetX + END_CELL.c * cell + pad,
+          offsetY + END_CELL.r * cell + pad,
+          cell - pad * 2,
+          cell - pad * 2
+        );
+      }
+
+      /** Full frame: clear stage, draw grid + endpoints. Called by render loop + resize. */
       function render() {
         const m = gridMetrics();
         ctx.clearRect(0, 0, m.width, m.height);
@@ -358,15 +474,49 @@
           .getPropertyValue("--cell")
           .trim() || "#05070d";
         ctx.fillRect(m.offsetX, m.offsetY, m.gridW, m.gridH);
+        drawEndpoints();
         drawGrid(maze.cells);
       }
 
       // ---- Render loop ------------------------------------------------------
-      // requestAnimationFrame keeps the frame fresh and gives later animation
-      // tasks a single place to hook into. It no-ops when nothing changes.
+      // A single requestAnimationFrame loop drives both idle rendering and the
+      // carving animation. When `animating` is true, a batch of carve steps is
+      // applied each frame; otherwise it just keeps the frame fresh.
       let rafId = 0;
+      // Steps to apply per animation frame. Tuned so the default 25×18 grid
+      // finishes carving in ~1s without frame drops.
+      const STEPS_PER_FRAME = 12;
+
       function frame() {
+        if (animating) {
+          const cells = maze.cells;
+          for (let i = 0; i < STEPS_PER_FRAME && carveIndex < carveSteps.length; i++) {
+            const s = carveSteps[carveIndex++];
+            cells[s.r][s.c][s.dir] = true;
+            cells[s.nr][s.nc][s.opp] = true;
+          }
+          if (carveIndex >= carveSteps.length) {
+            animating = false;
+            updateStats("ready");
+          }
+        }
         render();
+        rafId = requestAnimationFrame(frame);
+      }
+
+      /**
+       * Start (or restart) an animated generation run. Cancels any in-flight
+       * animation, resets the grid to fully walled, computes a fresh perfect
+       * maze + carve steps, and replays them via the render loop.
+       */
+      function regenerate() {
+        if (rafId) cancelAnimationFrame(rafId);
+        maze = makeEmptyMaze(DEFAULT_COLS, DEFAULT_ROWS);
+        const result = generateMazeAnimated(DEFAULT_COLS, DEFAULT_ROWS);
+        carveSteps = result.steps;
+        carveIndex = 0;
+        animating = true;
+        updateStats("carving…");
         rafId = requestAnimationFrame(frame);
       }
 
@@ -377,12 +527,17 @@
         if (status) document.getElementById("stat-status").textContent = status;
       }
 
+      // ---- Controls ---------------------------------------------------------
+      const btnRegenerate = document.getElementById("btn-regenerate");
+      btnRegenerate.addEventListener("click", regenerate);
+
       // ---- Boot -------------------------------------------------------------
-      // Defer first sizing until layout is measured.
+      // Defer first sizing until layout is measured, then play the opening
+      // carving animation.
       updateStats("ready");
       requestAnimationFrame(() => {
         resizeCanvas();
-        frame();
+        regenerate();
       });
 
       // Expose stable hooks for later tasks + the optional test harness.
@@ -396,6 +551,8 @@
         render,
         makeEmptyMaze,
         generateMaze,
+        generateMazeAnimated,
+        regenerate,
         gridMetrics,
       };
     </script>
