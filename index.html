@@ -540,8 +540,105 @@
         regenerate();
       });
 
+      // ---- Maze solver (BFS shortest path) ----------------------------------
+      /**
+       * solveMaze(maze, start, end) -> Array<[number, number]>
+       *
+       * Pure, stateless breadth-first search over the maze's open passages.
+       * Because every passage is unweighted and a perfect maze is a spanning
+       * tree, the first time BFS reaches `end` it has found a shortest path.
+       *
+       * Returns the path as an ordered array of [row, col] pairs from `start`
+       * to `end` inclusive. If no path exists (disconnected maze), returns an
+       * empty array. DOM-free and side-effect free.
+       *
+       * @param {{cols:number, rows:number, cells:Array<Array<{N:boolean,E:boolean,S:boolean,W:boolean}>>}} maze
+       * @param {[number, number]} start  [row, col] of the start cell
+       * @param {[number, number]} end    [row, col] of the target cell
+       * @returns {Array<[number, number]>}
+       */
+      function solveMaze(maze, start, end) {
+        if (!maze || !maze.cells) return [];
+        const { cols, rows, cells } = maze;
+        const sr = start[0], sc = start[1];
+        const er = end[0], ec = end[1];
+
+        // Guard against out-of-bounds or degenerate inputs.
+        if (
+          rows <= 0 || cols <= 0 ||
+          sr < 0 || sr >= rows || sc < 0 || sc >= cols ||
+          er < 0 || er >= rows || ec < 0 || ec >= cols
+        ) {
+          return [];
+        }
+
+        // start === end: trivial single-cell path.
+        if (sr === er && sc === ec) return [[sr, sc]];
+
+        // prev[r][c] stores the [row, col] we arrived from (null = unvisited).
+        const prev = Array.from({ length: rows }, () =>
+          new Array(cols).fill(null)
+        );
+        const visited = Array.from({ length: rows }, () =>
+          new Array(cols).fill(false)
+        );
+
+        // BFS queue. Each entry is a packed "r * cols + c" index to avoid
+        // per-step array allocations; decoded back into [r, c] below.
+        const queue = [sr * cols + sc];
+        visited[sr][sc] = true;
+
+        // [dirFlag, dRow, dCol] — dirFlag matches the cell's passage boolean.
+        const DIRS = [
+          ["N", -1, 0],
+          ["S", 1, 0],
+          ["E", 0, 1],
+          ["W", 0, -1],
+        ];
+
+        let head = 0; // pointer avoids the O(n) cost of queue.shift()
+        let found = false;
+
+        while (head < queue.length) {
+          const cur = queue[head++];
+          const r = (cur / cols) | 0;
+          const c = cur - r * cols;
+
+          if (r === er && c === ec) { found = true; break; }
+
+          const cell = cells[r][c];
+          for (let i = 0; i < DIRS.length; i++) {
+            const dir = DIRS[i][0];
+            if (!cell[dir]) continue; // wall on this side → skip
+            const nr = r + DIRS[i][1];
+            const nc = c + DIRS[i][2];
+            if (nr < 0 || nr >= rows || nc < 0 || nc >= cols) continue;
+            if (visited[nr][nc]) continue;
+            visited[nr][nc] = true;
+            prev[nr][nc] = [r, c];
+            queue.push(nr * cols + nc);
+          }
+        }
+
+        if (!found) return []; // end is unreachable
+
+        // Reconstruct the path by walking predecessors back to start.
+        const path = [];
+        let curR = er, curC = ec;
+        while (true) {
+          path.push([curR, curC]);
+          if (curR === sr && curC === sc) break;
+          const p = prev[curR][curC];
+          curR = p[0];
+          curC = p[1];
+        }
+        path.reverse();
+        return path;
+      }
+
       // Expose stable hooks for later tasks + the optional test harness.
       window.generateMaze = generateMaze; // perfect-maze generator (acceptance hook)
+      window.solveMaze = solveMaze; // BFS shortest-path solver (acceptance hook)
       window.__maze = {
         canvas,
         ctx,
@@ -552,6 +649,7 @@
         makeEmptyMaze,
         generateMaze,
         generateMazeAnimated,
+        solveMaze,
         regenerate,
         gridMetrics,
       };
