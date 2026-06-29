@@ -4,18 +4,319 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Maze Generator &amp; Solver</title>
+    <style>
+      /* ------------------------------------------------------------------
+         Design tokens — cohesive dark palette, system fonts only.
+         No external resources of any kind.
+      ------------------------------------------------------------------ */
+      :root {
+        --bg: #0d1117;
+        --panel: #161b22;
+        --panel-border: #30363d;
+        --fg: #c9d1d9;
+        --muted: #8b949e;
+        --accent: #58a6ff;
+        --accent-soft: rgba(88, 166, 255, 0.18);
+        --wall: #c9d1d9;
+        --cell: #05070d;
+        --radius: 10px;
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+          Helvetica, Arial, sans-serif;
+        color-scheme: dark;
+      }
+
+      * { box-sizing: border-box; }
+
+      html, body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        background: var(--bg);
+        color: var(--fg);
+        overflow: hidden; /* the canvas owns the viewport */
+      }
+
+      /* App shell: a left control rail + a full-bleed canvas stage. */
+      #app {
+        display: flex;
+        height: 100vh;
+        width: 100vw;
+      }
+
+      /* ---- Control panel (placeholders for later tasks) ---- */
+      #panel {
+        flex: 0 0 260px;
+        display: flex;
+        flex-direction: column;
+        gap: 1rem;
+        padding: 1.25rem;
+        background: var(--panel);
+        border-right: 1px solid var(--panel-border);
+        overflow-y: auto;
+      }
+      #panel h1 {
+        font-size: 1.05rem;
+        font-weight: 600;
+        margin: 0;
+        letter-spacing: 0.01em;
+      }
+      #panel .hint {
+        font-size: 0.78rem;
+        color: var(--muted);
+        line-height: 1.45;
+        margin: 0;
+      }
+      .group {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+      }
+      .group label {
+        font-size: 0.72rem;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--muted);
+      }
+      .placeholder {
+        font-size: 0.8rem;
+        color: var(--muted);
+        font-style: italic;
+        padding: 0.5rem 0.75rem;
+        border: 1px dashed var(--panel-border);
+        border-radius: 6px;
+      }
+      .stats {
+        font-size: 0.8rem;
+        color: var(--muted);
+        line-height: 1.6;
+      }
+      .stats span { color: var(--fg); }
+
+      /* ---- Canvas stage ---- */
+      #stage {
+        position: relative;
+        flex: 1 1 auto;
+        min-width: 0;
+        background: var(--cell);
+      }
+      #maze {
+        position: absolute;
+        inset: 0;
+        display: block;
+        width: 100%;
+        height: 100%;
+      }
+
+      /* Responsive: collapse the rail under the canvas on narrow screens. */
+      @media (max-width: 720px) {
+        #app { flex-direction: column; }
+        #panel { flex: 0 0 auto; border-right: none; border-bottom: 1px solid var(--panel-border); }
+      }
+    </style>
   </head>
   <body>
-    <!--
-      Implement the maze generator and solver here, following README.md.
+    <div id="app">
+      <!-- Control rail. Buttons/inputs are added by later tasks; this is the
+           stable layout scaffold. -->
+      <aside id="panel" aria-label="Controls">
+        <h1>Maze Generator &amp; Solver</h1>
+        <p class="hint">Watch a perfect maze carve itself, then animate the shortest path. Controls arrive in the next steps.</p>
 
-      Everything (HTML, CSS, JS) must live in this single file:
-        - no external requests, no libraries, no build step
-        - must run from file:// offline
+        <div class="group">
+          <label>Controls</label>
+          <div class="placeholder" id="ctrl-placeholder">Regenerate / Solve — coming soon</div>
+        </div>
 
-      Optional: expose `window.generateMaze(cols, rows)` and
-      `window.solveMaze(maze, start, end)` so maze-test.html can verify your
-      maze and solver automatically (see README.md).
-    -->
+        <div class="group">
+          <label>Maze size</label>
+          <div class="placeholder" id="size-placeholder">Adjustable size — coming soon</div>
+        </div>
+
+        <div class="group">
+          <label>Algorithm</label>
+          <div class="placeholder" id="algo-placeholder">Generator &amp; solver choice — coming soon</div>
+        </div>
+
+        <div class="group">
+          <label>Stats</label>
+          <div class="stats" id="stats">
+            Cells: <span id="stat-cells">—</span><br />
+            Status: <span id="stat-status">ready</span>
+          </div>
+        </div>
+      </aside>
+
+      <!-- Full-viewport rendering surface. -->
+      <main id="stage">
+        <canvas id="maze" aria-label="Maze canvas"></canvas>
+      </main>
+    </div>
+
+    <script>
+      "use strict";
+      /* ==================================================================
+         Maze scaffold — rendering surface only.
+         Later tasks plug in: generator, solver, animation, controls.
+         Everything below is dependency-free vanilla JS.
+      ================================================================== */
+
+      const canvas = document.getElementById("maze");
+      const ctx = canvas.getContext("2d");
+
+      // ---- Application state ------------------------------------------------
+      // Default grid dimensions (cells). Overridden by later size-control task.
+      const DEFAULT_COLS = 25;
+      const DEFAULT_ROWS = 18;
+
+      /** @type {{ cols:number, rows:number, cells:Array<Array<{N:boolean,E:boolean,S:boolean,W:boolean}>> }} */
+      let maze = makeEmptyMaze(DEFAULT_COLS, DEFAULT_ROWS);
+
+      // ---- Maze data helpers ------------------------------------------------
+      /**
+       * Build an empty (fully walled) maze object.
+       * Each cell stores four booleans: true = OPEN passage (no wall).
+       * This is the exact shape later generator tasks will mutate.
+       */
+      function makeEmptyMaze(cols, rows) {
+        const cells = [];
+        for (let r = 0; r < rows; r++) {
+          const row = [];
+          for (let c = 0; c < cols; c++) {
+            row.push({ N: false, E: false, S: false, W: false });
+          }
+          cells.push(row);
+        }
+        return { cols, rows, cells };
+      }
+
+      // ---- Canvas sizing ----------------------------------------------------
+      /** Device-pixel-ratio aware resize so walls stay crisp on HiDPI. */
+      function resizeCanvas() {
+        const stage = document.getElementById("stage");
+        const rect = stage.getBoundingClientRect();
+        const dpr = window.devicePixelRatio || 1;
+        // CSS size tracks the stage; backing store scales by DPR.
+        canvas.width = Math.max(1, Math.floor(rect.width * dpr));
+        canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+        canvas.style.width = rect.width + "px";
+        canvas.style.height = rect.height + "px";
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0); // draw in CSS pixels
+        render();
+      }
+
+      window.addEventListener("resize", resizeCanvas);
+
+      // ---- Geometry ---------------------------------------------------------
+      /**
+       * Compute the pixel metrics for drawing a grid into the current stage.
+       * The maze is centered and cell size is the largest that fits.
+       */
+      function gridMetrics() {
+        const stage = document.getElementById("stage");
+        const rect = stage.getBoundingClientRect();
+        const pad = 12; // breathing room around the grid
+        const availW = Math.max(0, rect.width - pad * 2);
+        const availH = Math.max(0, rect.height - pad * 2);
+        const cell = Math.max(
+          1,
+          Math.floor(Math.min(availW / maze.cols, availH / maze.rows))
+        );
+        const gridW = cell * maze.cols;
+        const gridH = cell * maze.rows;
+        const offsetX = Math.floor((rect.width - gridW) / 2);
+        const offsetY = Math.floor((rect.height - gridH) / 2);
+        return { cell, gridW, gridH, offsetX, offsetY, width: rect.width, height: rect.height };
+      }
+
+      // ---- Rendering --------------------------------------------------------
+      /**
+       * drawGrid(cells) — renders visible walls for a 2D cell array.
+       * A wall is drawn on a side when that passage is CLOSED (false).
+       * Acceptance target: visible cell walls matching grid dimensions.
+       * @param {Array<Array<{N:boolean,E:boolean,S:boolean,W:boolean}>>} cells
+       */
+      function drawGrid(cells) {
+        const rows = cells.length;
+        const cols = rows ? cells[0].length : 0;
+        const { cell, offsetX, offsetY } = gridMetrics();
+
+        ctx.lineCap = "square";
+        ctx.lineJoin = "miter";
+        ctx.lineWidth = Math.max(1, Math.min(2, cell * 0.12));
+        ctx.strokeStyle = getComputedStyle(document.documentElement)
+          .getPropertyValue("--wall")
+          .trim() || "#c9d1d9";
+
+        ctx.beginPath();
+        for (let r = 0; r < rows; r++) {
+          for (let c = 0; c < cols; c++) {
+            const x = offsetX + c * cell;
+            const y = offsetY + r * cell;
+            const w = cells[r][c];
+            // Draw a wall on each closed side. (Open passage => no wall.)
+            if (!w.N) line(x, y, x + cell, y); // top
+            if (!w.S) line(x, y + cell, x + cell, y + cell); // bottom
+            if (!w.W) line(x, y, x, y + cell); // left
+            if (!w.E) line(x + cell, y, x + cell, y + cell); // right
+          }
+        }
+        ctx.stroke();
+      }
+
+      /** Internal: queue a straight wall segment. */
+      function line(x1, y1, x2, y2) {
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+      }
+
+      /** Full frame: clear stage, draw grid. Called by render loop + resize. */
+      function render() {
+        const m = gridMetrics();
+        ctx.clearRect(0, 0, m.width, m.height);
+        // Subtle grid backdrop for empty cells.
+        ctx.fillStyle = getComputedStyle(document.documentElement)
+          .getPropertyValue("--cell")
+          .trim() || "#05070d";
+        ctx.fillRect(m.offsetX, m.offsetY, m.gridW, m.gridH);
+        drawGrid(maze.cells);
+      }
+
+      // ---- Render loop ------------------------------------------------------
+      // requestAnimationFrame keeps the frame fresh and gives later animation
+      // tasks a single place to hook into. It no-ops when nothing changes.
+      let rafId = 0;
+      function frame() {
+        render();
+        rafId = requestAnimationFrame(frame);
+      }
+
+      // ---- Stats ------------------------------------------------------------
+      function updateStats(status) {
+        document.getElementById("stat-cells").textContent =
+          maze.cols * maze.rows;
+        if (status) document.getElementById("stat-status").textContent = status;
+      }
+
+      // ---- Boot -------------------------------------------------------------
+      // Defer first sizing until layout is measured.
+      updateStats("ready");
+      requestAnimationFrame(() => {
+        resizeCanvas();
+        frame();
+      });
+
+      // Expose stable hooks for later tasks + the optional test harness.
+      // (Generator/solver bodies are added by subsequent tasks.)
+      window.__maze = {
+        canvas,
+        ctx,
+        getMaze: () => maze,
+        setMaze: (m) => { maze = m; updateStats(); },
+        drawGrid,
+        render,
+        makeEmptyMaze,
+        gridMetrics,
+      };
+    </script>
   </body>
 </html>
