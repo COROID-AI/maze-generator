@@ -21,6 +21,7 @@
         --cell: #05070d;
         --explored: rgba(88, 166, 255, 0.22);
         --path: rgba(63, 185, 80, 0.55);
+        --path-glow: rgba(63, 185, 80, 0.85);
         --radius: 10px;
         font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
           Helvetica, Arial, sans-serif;
@@ -704,12 +705,45 @@
       function drawPath() {
         if (pathIndex === 0) return;
         const { cell, offsetX, offsetY } = gridMetrics();
-        ctx.fillStyle = getComputedStyle(document.documentElement)
-          .getPropertyValue("--path")
-          .trim() || "rgba(63,185,80,0.55)";
+        const pathColor =
+          getComputedStyle(document.documentElement)
+            .getPropertyValue("--path")
+            .trim() || "rgba(63,185,80,0.55)";
+        const pathGlow =
+          getComputedStyle(document.documentElement)
+            .getPropertyValue("--path-glow")
+            .trim() || "rgba(63,185,80,0.85)";
+
+        // Glow pass: draw the path cells with a soft shadow blur so the
+        // solution route appears to emit light. shadowBlur scales with cell
+        // size so it reads on both small and large grids.
+        ctx.save();
+        ctx.shadowColor = pathGlow;
+        ctx.shadowBlur = Math.max(6, cell * 0.6);
+        ctx.fillStyle = pathColor;
+        const pad = Math.max(1, cell * 0.12);
         for (let i = 0; i < pathIndex; i++) {
           const [r, c] = solvePath[i];
-          ctx.fillRect(offsetX + c * cell, offsetY + r * cell, cell, cell);
+          // Inset slightly so the glow halos around a crisp core.
+          ctx.fillRect(
+            offsetX + c * cell + pad,
+            offsetY + r * cell + pad,
+            cell - pad * 2,
+            cell - pad * 2
+          );
+        }
+        // Crisp core pass (no shadow) for a sharp, high-contrast center.
+        ctx.restore();
+        ctx.fillStyle = pathGlow;
+        for (let i = 0; i < pathIndex; i++) {
+          const [r, c] = solvePath[i];
+          const cp = Math.max(2, cell * 0.3);
+          ctx.fillRect(
+            offsetX + c * cell + cp,
+            offsetY + r * cell + cp,
+            cell - cp * 2,
+            cell - cp * 2
+          );
         }
       }
 
@@ -745,10 +779,41 @@
         return Math.max(1, Math.round(base * (animSpeed / 100)));
       }
 
+      // ---- Easing -----------------------------------------------------------
+      // Smoothstep ease-in-out: 0 at p=0, 1 at p=1, with a gentle S-curve that
+      // makes animations feel organic — slow start, fast middle, slow finish.
+      // Used to scale the per-frame batch so the carve/solve rhythm breathes
+      // instead of marching at a constant rate.
+      function easeInOut(p) {
+        const x = Math.max(0, Math.min(1, p));
+        return x * x * (3 - 2 * x);
+      }
+
+      /**
+       * Eased batch size for a running animation.
+       * Combines the user speed setting with an ease-in-out curve over the
+       * animation's overall progress (done/total). Near the start and end the
+       * batch shrinks (deceleration); mid-animation it peaks. The floor of 1
+      // guarantees the animation never stalls on large mazes.
+       * @param {number} base   unscaled per-frame batch (e.g. STEPS_PER_FRAME)
+       * @param {number} done   steps completed so far
+       * @param {number} total  total steps in the animation
+       * @returns {number}
+       */
+      function easedBatch(base, done, total) {
+        const speed = speedScale(base);
+        if (total <= 0) return speed;
+        const progress = done / total;
+        // Map ease [0..1] into a [0.45..1.0] multiplier so the slow tails
+        // still advance visibly and never freeze on big grids.
+        const e = 0.45 + 0.55 * easeInOut(progress);
+        return Math.max(1, Math.round(speed * e));
+      }
+
       function frame() {
         if (mode === "carving") {
           const cells = maze.cells;
-          const batch = speedScale(STEPS_PER_FRAME);
+          const batch = easedBatch(STEPS_PER_FRAME, carveIndex, carveSteps.length);
           for (let i = 0; i < batch && carveIndex < carveSteps.length; i++) {
             const s = carveSteps[carveIndex++];
             cells[s.r][s.c][s.dir] = true;
@@ -759,8 +824,9 @@
             updateStats("ready");
           }
         } else if (mode === "exploring") {
-          // Reveal a batch of explored cells per frame (BFS flood order).
-          const target = Math.min(exploredIndex + speedScale(EXPLORE_PER_FRAME), exploredOrder.length);
+          // Reveal a batch of explored cells per frame (BFS flood order),
+          // eased so the flood gently accelerates then settles.
+          const target = Math.min(exploredIndex + easedBatch(EXPLORE_PER_FRAME, exploredIndex, exploredOrder.length), exploredOrder.length);
           exploredIndex = target;
           updateStats("solving…");
           if (exploredIndex >= exploredOrder.length) {
@@ -773,8 +839,9 @@
             }
           }
         } else if (mode === "pathing") {
-          // Reveal the shortest path cells on top of the explored flood.
-          const target = Math.min(pathIndex + speedScale(PATH_PER_FRAME), solvePath.length);
+          // Reveal the shortest path cells on top of the explored flood,
+          // eased so the path draws with a smooth in/out cadence.
+          const target = Math.min(pathIndex + easedBatch(PATH_PER_FRAME, pathIndex, solvePath.length), solvePath.length);
           pathIndex = target;
           updateStats("solving…");
           if (pathIndex >= solvePath.length) {
