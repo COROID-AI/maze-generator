@@ -212,7 +212,7 @@
            stable layout scaffold. -->
       <aside id="panel" aria-label="Controls">
         <h1>Maze Generator &amp; Solver</h1>
-        <p class="hint">Watch a perfect maze carve itself, then animate the shortest path. Click any cell to set start/end points.</p>
+        <p class="hint">Watch a perfect maze carve itself, then animate the shortest path. Click any cell to set start/end points. Shortcuts: <strong>G</strong> regenerate, <strong>S</strong> solve.</p>
 
         <div class="group">
           <label>Controls</label>
@@ -1060,6 +1060,35 @@
         pathIndex = 0;
         render();
         updateStats("ready");
+      });
+
+      // ---- Keyboard shortcuts ----------------------------------------------
+      // G → regenerate, S → solve. The handler deliberately ignores keys when
+      // focus is inside an editable control (input/select/textarea/contenteditable)
+      // so typing dimensions or tab-navigation never accidentally fires an
+      // action. Modifier combos (Ctrl/Cmd/Alt/Meta) are also skipped so native
+      // browser shortcuts and accessibility tools keep working. Both actions
+      // already cancel any in-flight animation and reset state, so rapid key
+      // repeats are safe.
+      document.addEventListener("keydown", (e) => {
+        const t = e.target;
+        const tag = t && t.tagName;
+        if (
+          tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA" ||
+          (t && t.isContentEditable)
+        ) {
+          return;
+        }
+        if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+        const key = e.key.toLowerCase();
+        if (key === "g") {
+          e.preventDefault();
+          regenerate();
+        } else if (key === "s") {
+          e.preventDefault();
+          solve();
+        }
       });
 
       // ---- Boot -------------------------------------------------------------
